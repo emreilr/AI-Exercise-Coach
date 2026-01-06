@@ -70,5 +70,5 @@ The core technology relies on **Spatial-Temporal Graph Convolutional Networks (S
     npm run dev
     ```
 
-License
+#### License
 This project is open-source and available under the MIT License.

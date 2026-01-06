@@ -55,11 +55,11 @@ def init_db():
         "rule": {
             "type": "object",
             "properties": {
-                "exercise_name": {"type": "string"},
+                "name": {"type": "string"},
                 "description": {"type": "string"},
-                "ref_video_id": {"type": "string"}
+                "ref_video_id": {"type": ["string", "null"]}
             },
-            "required": ["exercise_name"]
+            "required": ["name"]
         },
         "level": "moderate",
         "message": "Start validation for Exercise collection"
@@ -199,7 +199,7 @@ def init_db():
     
     # --- Exercise Collection ---
     exercise_col = db.collection("Exercise")
-    ensure_index(exercise_col, ["exercise_name"], unique=True)
+    ensure_index(exercise_col, ["name"], unique=True)
     ensure_index(exercise_col, ["ref_video_id"])
 
     # --- Video Collection ---

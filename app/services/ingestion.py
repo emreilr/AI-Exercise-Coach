@@ -8,6 +8,8 @@ import json
 from typing import List, Dict, Any, Optional
 
 from app.db.database import ArangoDBConnection
+from app.db.orientdb_client import OrientDBClient
+from app.services.inference import generate_embeddings_for_video_data
 
 # Initialize MediaPipe Pose
 mp_pose = mp.solutions.pose
@@ -19,7 +21,7 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.5
 )
 
-def process_video(video_path: str, user_id: str, exercise_id: str):
+def process_video(video_path: str, user_id: str, exercise_id: str, is_reference: bool = False, model_path: Optional[str] = None, video_id: Optional[str] = None):
     """
     Processes a video file to extract pose landmarks and ingests them into ArangoDB as a graph.
     
@@ -27,6 +29,9 @@ def process_video(video_path: str, user_id: str, exercise_id: str):
         video_path: Path to the uploaded video file.
         user_id: ID of the user who uploaded the video.
         exercise_id: ID of the exercise being performed.
+        is_reference: Boolean flag indicating if this is a reference video.
+        model_path: Path to the model file for embedding generation.
+        video_id: Specific UUID for the video (optional). If None, one is generated.
     """
     print(f"[Ingestion] Starting processing for video: {video_path}")
     
@@ -46,7 +51,11 @@ def process_video(video_path: str, user_id: str, exercise_id: str):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
     # 2. Prepare Video Node Data
-    video_uuid = str(uuid.uuid4())
+    if not video_id:
+        video_uuid = str(uuid.uuid4())
+    else:
+        video_uuid = video_id
+        
     upload_time = datetime.datetime.utcnow().isoformat()
     
     video_doc = {
@@ -57,7 +66,8 @@ def process_video(video_path: str, user_id: str, exercise_id: str):
         "upload_time": upload_time,
         "fps": fps,
         "frame_count": total_frames,
-        "embedding_dimension": 128 # Default as per requirements
+        "embedding_dimension": 128, # Default as per requirements
+        "is_reference": is_reference
     }
     
     # 3. Process Frames & Extract Landmarks
@@ -106,7 +116,7 @@ def process_video(video_path: str, user_id: str, exercise_id: str):
             "frame_number": frame_idx,
             "timestamp": timestamp_ms,
             "pose_landmark": landmarks_data,
-            "embeded_vector": None # Placeholder
+            "embeded_vector": None # Placeholder, will be updated shortly
         }
         frames_buffer.append(frame_doc)
         
@@ -136,7 +146,34 @@ def process_video(video_path: str, user_id: str, exercise_id: str):
             print(f"[Ingestion] Processed {frame_idx}/{total_frames} frames")
 
     cap.release()
-    print("[Ingestion] Video processing complete. Storing to Graph DB...")
+    print("[Ingestion] Video processing complete. Generating Embeddings...")
+
+    # 3.5 Generate Embeddings
+    if model_path:
+        print(f"[Ingestion] Model path provided: {model_path}. Generating embeddings...")
+        try:
+            # Generate Embeddings using the specific model path
+            # The inference service now handles loading/caching safely.
+            
+            # Extract just list of landmarks from buffer
+            all_landmarks = [f["pose_landmark"] for f in frames_buffer]
+            embeddings = generate_embeddings_for_video_data(all_landmarks, model_path=model_path)
+            
+            # Assign back to frames
+            count_embeddings = 0
+            for i, emb in enumerate(embeddings):
+                if emb is not None:
+                    frames_buffer[i]["embeded_vector"] = emb
+                    count_embeddings += 1
+                    
+            print(f"[Ingestion] Generated {count_embeddings} embeddings using model {model_path}.")
+
+        except Exception as e:
+            print(f"[Ingestion] Error generating embeddings: {e}")
+    else:
+        print("[Ingestion] No model path provided. Skipping embedding generation (deferred).")
+
+    print("[Ingestion] Storing to Graph DB...")
 
     # 4. Ingest into ArangoDB (Bulk Import)
     try:
@@ -159,6 +196,38 @@ def process_video(video_path: str, user_id: str, exercise_id: str):
             print(f"[Ingestion] Imported {len(edges_buffer)} frame edges.")
             
         print("[Ingestion] Data ingestion successful.")
+        
+        # --- Dual Write to OrientDB ---
+        try:
+            print("[Ingestion] Syncing to OrientDB...")
+            orient = OrientDBClient()
+            
+            # 1. Sync Video
+            orient.create_vertex("Video", video_doc)
+            
+            # 2. Sync Frames (Looping)
+            # This might be slow for large videos, consider optimizing or running in thread
+            for frame in frames_buffer:
+                orient.create_vertex("Frame", frame)
+                
+            # 3. Sync Edges
+            for edge in edges_buffer:
+                # Edge format: _from: "Class/Key", _to: "Class/Key"
+                # distinct logic to parse
+                from_parts = edge["_from"].split('/')
+                to_parts = edge["_to"].split('/')
+                
+                # frame edges
+                orient.create_edge(
+                    "FrameEdge", 
+                    from_parts[0], from_parts[1], # From Class, From Key
+                    to_parts[0], to_parts[1],     # To Class, To Key
+                    edge
+                )
+            
+            print("[Ingestion] OrientDB sync complete.")
+        except Exception as e:
+            print(f"[Warning] OrientDB Sync Failed: {e}")
         
     except Exception as e:
         print(f"[Ingestion] Database Error: {e}")

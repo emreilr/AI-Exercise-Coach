@@ -1,0 +1,12 @@
+{
+    "name": "dev-ops",
+    "version": "1.0.0",
+    "description": "Developer Operations Service (Stored Procs & Triggers)",
+    "scripts": {
+        "setup": "scripts/setup.js"
+    },
+    "main": "main.js",
+    "engines": {
+        "arangodb": "^3.0.0"
+    }
+}
